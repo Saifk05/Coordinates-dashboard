@@ -14,8 +14,9 @@ import axios from "axios";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 // @ts-ignore
-import MarkerClusterGroup from "@changey/react-leaflet-markercluster";
+import MarkerClusterGroup from "react-leaflet-cluster";
 
+// ✅ Define types
 interface Sample {
   action: string;
   created_time: string;
@@ -33,6 +34,11 @@ interface GroupedItem {
   coords: [number, number];
   count: number;
   samples: Sample[];
+}
+
+// ✅ Fix TypeScript "no _leaflet_id" issue
+interface LeafletElement extends HTMLElement {
+  _leaflet_id?: string | null;
 }
 
 const MapDashboard: React.FC = () => {
@@ -60,9 +66,8 @@ const MapDashboard: React.FC = () => {
       });
 
       const rows = res.data.data || [];
-
-      // 🧩 Step 1: Deduplicate
       const seen = new Set<string>();
+
       const uniqueRows = rows.filter((r: any) => {
         const isInvalid = (val: any) => {
           if (val === null || val === undefined) return true;
@@ -104,7 +109,6 @@ const MapDashboard: React.FC = () => {
         return true;
       });
 
-      // 🧮 Step 2: Group after deduplication
       const grouped: Record<string, GroupedItem> = {};
       const pinSet = new Set<string>();
 
@@ -189,11 +193,17 @@ const MapDashboard: React.FC = () => {
     return null;
   };
 
-  // 🔍 Filter by pincode
   const filteredData = data.filter((item) => {
     if (!filterPin.trim()) return true;
     return item.pincode.toString() === filterPin.trim();
   });
+
+  // 🧹 Prevent "Map container already initialized" in StrictMode
+  const mapContainerId = "leaflet-map";
+  useEffect(() => {
+    const container = L.DomUtil.get(mapContainerId) as LeafletElement | null;
+    if (container) container._leaflet_id = null;
+  }, [filterPin, data.length]);
 
   return (
     <div>
@@ -246,11 +256,15 @@ const MapDashboard: React.FC = () => {
 
       {/* 🗺️ Map */}
       <MapContainer
+        id={mapContainerId}
+        key={`${filterPin}-${data.length}`}
         center={[12.97, 77.59]}
         zoom={11}
         style={{ height: "85vh", width: "100%" }}
+        preferCanvas={true}
       >
         <ZoomTracker />
+
         <TileLayer
           attribution='&copy; OpenStreetMap contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
