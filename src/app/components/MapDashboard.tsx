@@ -13,7 +13,8 @@ import {
 import axios from "axios";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import MarkerClusterGroup from "react-leaflet-cluster";
+// @ts-ignore
+import MarkerClusterGroup from "@changey/react-leaflet-markercluster";
 
 interface Sample {
   action: string;
