@@ -11,7 +11,7 @@ import {
   useMapEvents,
 } from "react-leaflet";
 import axios from "axios";
-import { Icon } from "leaflet";
+import { Icon, LatLngBounds } from "leaflet";
 import "leaflet/dist/leaflet.css";
 
 interface Sample {
@@ -38,10 +38,11 @@ const MapDashboard: React.FC = () => {
   const [zoomLevel, setZoomLevel] = useState(11);
   const [filterPin, setFilterPin] = useState("");
   const [allPins, setAllPins] = useState<string[]>([]);
+  const [bounds, setBounds] = useState<LatLngBounds | null>(null);
 
   const API_URL = "/api/data";
 
-  // Parse GPS "(12.97,77.59)" → [12.97, 77.59]
+  // Parse "(12.97,77.59)" → [12.97, 77.59]
   const cleanCoords = (gps: string | null): [number, number] | null => {
     if (!gps) return null;
     const cleaned = gps.replace(/[()]/g, "").trim();
@@ -59,7 +60,10 @@ const MapDashboard: React.FC = () => {
       const rows = res.data.data || [];
 
       const seen = new Set<string>();
-      const uniqueRows = rows.filter((r: any) => {
+      const grouped: Record<string, GroupedItem> = {};
+      const pins = new Set<string>();
+
+      for (const r of rows) {
         const invalid = (v: any) =>
           v == null || v === "" || v === "null" || v === "undefined";
 
@@ -69,7 +73,7 @@ const MapDashboard: React.FC = () => {
           invalid(r.start_area_code) ||
           invalid(r.end_area_code)
         )
-          return false;
+          continue;
 
         const clean = (gps: string) => {
           const cleaned = gps.replace(/[()]/g, "").trim();
@@ -83,39 +87,30 @@ const MapDashboard: React.FC = () => {
         const startPin = r.start_area_code.toString().trim();
         const endPin = r.end_area_code.toString().trim();
 
-        if (!startGPS || !endGPS) return false;
+        if (!startGPS || !endGPS) continue;
 
         const forward = [startGPS, endGPS, startPin, endPin].join("|");
         const reverse = [endGPS, startGPS, endPin, startPin].join("|");
-
-        if (seen.has(forward) || seen.has(reverse)) return false;
+        if (seen.has(forward) || seen.has(reverse)) continue;
         seen.add(forward);
-        return true;
-      });
 
-      const grouped: Record<string, GroupedItem> = {};
-      const pins = new Set<string>();
-
-      uniqueRows.forEach((r: any) => {
         const gpsList = [
-          { gps: r.start_gps, type: "start" },
-          { gps: r.end_gps, type: "end" },
+          { gps: r.start_gps },
+          { gps: r.end_gps },
         ].filter((x) => x.gps);
 
         const pin = r.start_area_code || r.end_area_code || "Unknown";
-        if (pin) pins.add(pin);
+        pins.add(pin);
 
-        gpsList.forEach(({ gps }) => {
+        for (const { gps } of gpsList) {
           const coords = cleanCoords(gps);
-          if (!coords) return;
+          if (!coords) continue;
           const key = `${pin}_${coords.join(",")}`;
-          if (!grouped[key]) {
-            grouped[key] = { pincode: pin, coords, count: 0, samples: [] };
-          }
+          if (!grouped[key]) grouped[key] = { pincode: pin, coords, count: 0, samples: [] };
           grouped[key].count += 1;
           grouped[key].samples.push(r);
-        });
-      });
+        }
+      }
 
       setData(Object.values(grouped));
       setAllPins([...pins].sort());
@@ -128,7 +123,7 @@ const MapDashboard: React.FC = () => {
     fetchData();
   }, [fetchData]);
 
-  // Color + radius
+  // Color logic
   const getColor = (c: number) =>
     c > 1000
       ? "#006400"
@@ -143,21 +138,31 @@ const MapDashboard: React.FC = () => {
   const getRadius = (count: number, zoom: number) =>
     Math.max(50, Math.min(Math.log(count + 1) * 120 * (12 / zoom), 1500));
 
-  // Zoom tracker
-  const ZoomTracker = () => {
-    useMapEvents({ zoomend: (e) => setZoomLevel(e.target.getZoom()) });
-    return null;
-  };
-
+  // Marker icon
   const markerIcon = new Icon({
     iconUrl: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
     iconSize: [32, 32],
     iconAnchor: [16, 32],
   });
 
+  // Track zoom and bounds
+  const ZoomTracker = () => {
+    useMapEvents({
+      zoomend: (e) => setZoomLevel(e.target.getZoom()),
+      moveend: (e) => setBounds(e.target.getBounds()),
+    });
+    return null;
+  };
+
   const filteredData = data.filter((d) =>
     !filterPin ? true : d.pincode.toString() === filterPin.trim()
   );
+
+  // Show only items inside map bounds (if known)
+  const visibleData =
+    bounds == null
+      ? filteredData.slice(0, 1000)
+      : filteredData.filter((d) => bounds.contains(d.coords));
 
   const mapContainerId = "leaflet-map";
 
@@ -169,8 +174,12 @@ const MapDashboard: React.FC = () => {
   return (
     <div>
       <h2 style={{ textAlign: "center", margin: "10px" }}>
-        Coordinates by Pincode (Full Details on Hover)
+        Coordinates by Pincode (Hover for Details)
       </h2>
+      <p style={{ textAlign: "center", color: "gray" }}>
+        Showing {visibleData.length.toLocaleString()} of{" "}
+        {filteredData.length.toLocaleString()} points
+      </p>
 
       {/* Dropdown filter */}
       <div
@@ -229,8 +238,7 @@ const MapDashboard: React.FC = () => {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        {/* Render Markers directly */}
-        {filteredData.map((item, i) => (
+        {visibleData.map((item, i) => (
           <Marker key={i} position={item.coords} icon={markerIcon}>
             <Popup>
               <b>Pincode:</b> {item.pincode}
@@ -255,7 +263,7 @@ const MapDashboard: React.FC = () => {
           </Marker>
         ))}
 
-        {filteredData.map((item, i) => (
+        {visibleData.map((item, i) => (
           <Circle
             key={`circle-${i}`}
             center={item.coords}
