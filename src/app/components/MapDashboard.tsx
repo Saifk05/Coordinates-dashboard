@@ -1,18 +1,9 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
-import {
-  MapContainer,
-  TileLayer,
-  Circle,
-  Tooltip,
-  Popup,
-  Marker,
-  useMapEvents,
-} from "react-leaflet";
-import axios from "axios";
-import { Icon, LatLngBounds } from "leaflet";
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import axios from "axios";
 
 interface Sample {
   action: string;
@@ -34,15 +25,14 @@ interface GroupedItem {
 }
 
 const MapDashboard: React.FC = () => {
+  const mapRef = useRef<L.Map | null>(null);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
   const [data, setData] = useState<GroupedItem[]>([]);
-  const [zoomLevel, setZoomLevel] = useState(11);
   const [filterPin, setFilterPin] = useState("");
   const [allPins, setAllPins] = useState<string[]>([]);
-  const [bounds, setBounds] = useState<LatLngBounds | null>(null);
 
   const API_URL = "/api/data";
 
-  // Parse "(12.97,77.59)" → [12.97, 77.59]
   const cleanCoords = (gps: string | null): [number, number] | null => {
     if (!gps) return null;
     const cleaned = gps.replace(/[()]/g, "").trim();
@@ -51,7 +41,6 @@ const MapDashboard: React.FC = () => {
     return [parts[0], parts[1]];
   };
 
-  // Fetch + group coordinates
   const fetchData = useCallback(async () => {
     try {
       const res = await axios.get(API_URL, {
@@ -66,7 +55,6 @@ const MapDashboard: React.FC = () => {
       for (const r of rows) {
         const invalid = (v: any) =>
           v == null || v === "" || v === "null" || v === "undefined";
-
         if (
           invalid(r.start_gps) ||
           invalid(r.end_gps) ||
@@ -106,7 +94,8 @@ const MapDashboard: React.FC = () => {
           const coords = cleanCoords(gps);
           if (!coords) continue;
           const key = `${pin}_${coords.join(",")}`;
-          if (!grouped[key]) grouped[key] = { pincode: pin, coords, count: 0, samples: [] };
+          if (!grouped[key])
+            grouped[key] = { pincode: pin, coords, count: 0, samples: [] };
           grouped[key].count += 1;
           grouped[key].samples.push(r);
         }
@@ -123,65 +112,79 @@ const MapDashboard: React.FC = () => {
     fetchData();
   }, [fetchData]);
 
-  // Color logic
-  const getColor = (c: number) =>
-    c > 1000
-      ? "#006400"
-      : c > 500
-      ? "#32CD32"
-      : c > 100
-      ? "#FFD700"
-      : c > 20
-      ? "#FFA500"
-      : "#FF0000";
-
-  const getRadius = (count: number, zoom: number) =>
-    Math.max(50, Math.min(Math.log(count + 1) * 120 * (12 / zoom), 1500));
-
-  // Marker icon
-  const markerIcon = new Icon({
-    iconUrl: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
-    iconSize: [32, 32],
-    iconAnchor: [16, 32],
-  });
-
-  // Track zoom and bounds
-  const ZoomTracker = () => {
-    useMapEvents({
-      zoomend: (e) => setZoomLevel(e.target.getZoom()),
-      moveend: (e) => setBounds(e.target.getBounds()),
-    });
-    return null;
-  };
-
-  const filteredData = data.filter((d) =>
-    !filterPin ? true : d.pincode.toString() === filterPin.trim()
-  );
-
-  // Show only items inside map bounds (if known)
-  const visibleData =
-    bounds == null
-      ? filteredData.slice(0, 1000)
-      : filteredData.filter((d) => bounds.contains(d.coords));
-
-  const mapContainerId = "leaflet-map";
-
   useEffect(() => {
-    const el = document.getElementById(mapContainerId) as HTMLElement | null;
-    if (el && (el as any)._leaflet_id) delete (el as any)._leaflet_id;
-  }, [filterPin, data.length]);
+    if (!mapContainerRef.current) return;
+
+    // ✅ Initialize the map only once
+    if (!mapRef.current) {
+      mapRef.current = L.map(mapContainerRef.current).setView([12.97, 77.59], 11);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(mapRef.current);
+    }
+
+    const map = mapRef.current;
+    map.eachLayer((layer) => {
+      if (!(layer as any).getAttribution) map.removeLayer(layer);
+    });
+
+    // ✅ Add circles and markers
+    const filtered = data.filter((d) =>
+      !filterPin ? true : d.pincode.toString() === filterPin.trim()
+    );
+
+    filtered.forEach((item) => {
+      const [lat, lng] = item.coords;
+      const color =
+        item.count > 1000
+          ? "#006400"
+          : item.count > 500
+          ? "#32CD32"
+          : item.count > 100
+          ? "#FFD700"
+          : item.count > 20
+          ? "#FFA500"
+          : "#FF0000";
+
+      const radius = Math.max(
+        50,
+        Math.min(Math.log(item.count + 1) * 120, 1500)
+      );
+
+      const circle = L.circle([lat, lng], {
+        radius,
+        color,
+        fillColor: color,
+        fillOpacity: 0.4,
+      }).addTo(map);
+
+      circle.bindPopup(`<b>Pincode:</b> ${item.pincode}<br/><b>Count:</b> ${item.count}`);
+
+      const marker = L.marker([lat, lng], {
+        icon: L.icon({
+          iconUrl: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
+          iconSize: [32, 32],
+          iconAnchor: [16, 32],
+        }),
+      }).addTo(map);
+
+      marker.bindPopup(`<b>Pincode:</b> ${item.pincode}<br/><b>Count:</b> ${item.count}`);
+    });
+
+    return () => {
+      // Cleanup all markers/circles, but keep map instance alive
+      map.eachLayer((layer) => {
+        if (!(layer as any).getAttribution) map.removeLayer(layer);
+      });
+    };
+  }, [data, filterPin]);
 
   return (
     <div>
       <h2 style={{ textAlign: "center", margin: "10px" }}>
-        Coordinates by Pincode (Hover for Details)
+        Coordinates by Pincode
       </h2>
-      <p style={{ textAlign: "center", color: "gray" }}>
-        Showing {visibleData.length.toLocaleString()} of{" "}
-        {filteredData.length.toLocaleString()} points
-      </p>
 
-      {/* Dropdown filter */}
       <div
         style={{
           display: "flex",
@@ -208,7 +211,6 @@ const MapDashboard: React.FC = () => {
           ))}
         </select>
         <button
-          type="button"
           onClick={() => setFilterPin("")}
           style={{
             padding: "6px 12px",
@@ -223,64 +225,11 @@ const MapDashboard: React.FC = () => {
         </button>
       </div>
 
-      {/* Map */}
-      <MapContainer
-        id={mapContainerId}
-        key={`${filterPin}-${data.length}`}
-        center={[12.97, 77.59]}
-        zoom={11}
-        style={{ height: "85vh", width: "100%" }}
-        preferCanvas
-      >
-        <ZoomTracker />
-        <TileLayer
-          attribution='&copy; OpenStreetMap contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
-
-        {visibleData.map((item, i) => (
-          <Marker key={i} position={item.coords} icon={markerIcon}>
-            <Popup>
-              <b>Pincode:</b> {item.pincode}
-              <br />
-              <b>Count:</b> {item.count}
-              <hr />
-              {item.samples.slice(0, 3).map((s: any, j: number) => (
-                <div key={j} style={{ marginBottom: "6px" }}>
-                  <b>Action:</b> {s.action} <br />
-                  <b>BAP:</b> {s.bap_id} <br />
-                  <b>Txn:</b> {s.transaction_id} <br />
-                  <b>Category:</b> {s.category}
-                  <hr />
-                </div>
-              ))}
-              {item.samples.length > 3 && (
-                <small style={{ color: "gray" }}>
-                  +{item.samples.length - 3} more records...
-                </small>
-              )}
-            </Popup>
-          </Marker>
-        ))}
-
-        {visibleData.map((item, i) => (
-          <Circle
-            key={`circle-${i}`}
-            center={item.coords}
-            radius={getRadius(item.count, zoomLevel)}
-            color={getColor(item.count)}
-            fillColor={getColor(item.count)}
-            fillOpacity={0.4}
-            weight={1.5}
-          >
-            <Tooltip direction="top" offset={[0, -15]}>
-              <b>Pincode:</b> {item.pincode}
-              <br />
-              <b>Count:</b> {item.count}
-            </Tooltip>
-          </Circle>
-        ))}
-      </MapContainer>
+      <div
+        ref={mapContainerRef}
+        id="map"
+        style={{ height: "85vh", width: "100%", borderRadius: "8px" }}
+      />
     </div>
   );
 };
