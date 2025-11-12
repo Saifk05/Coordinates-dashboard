@@ -11,12 +11,9 @@ import {
   useMapEvents,
 } from "react-leaflet";
 import axios from "axios";
-import L from "leaflet";
+import { Icon } from "leaflet";
 import "leaflet/dist/leaflet.css";
-// @ts-ignore
-import MarkerClusterGroup from "react-leaflet-cluster";
 
-// ✅ Define types
 interface Sample {
   action: string;
   created_time: string;
@@ -36,11 +33,6 @@ interface GroupedItem {
   samples: Sample[];
 }
 
-// ✅ Fix TypeScript "no _leaflet_id" issue
-interface LeafletElement extends HTMLElement {
-  _leaflet_id?: string | null;
-}
-
 const MapDashboard: React.FC = () => {
   const [data, setData] = useState<GroupedItem[]>([]);
   const [zoomLevel, setZoomLevel] = useState(11);
@@ -49,7 +41,7 @@ const MapDashboard: React.FC = () => {
 
   const API_URL = "/api/data";
 
-  // 🧹 Clean GPS "(12.97,77.59)" → [12.97, 77.59]
+  // Parse GPS "(12.97,77.59)" → [12.97, 77.59]
   const cleanCoords = (gps: string | null): [number, number] | null => {
     if (!gps) return null;
     const cleaned = gps.replace(/[()]/g, "").trim();
@@ -58,34 +50,26 @@ const MapDashboard: React.FC = () => {
     return [parts[0], parts[1]];
   };
 
-  // 📡 Fetch + group duplicate coordinates per PINCODE + store full record
+  // Fetch + group coordinates
   const fetchData = useCallback(async () => {
     try {
       const res = await axios.get(API_URL, {
         headers: { "ngrok-skip-browser-warning": "69420" },
       });
-
       const rows = res.data.data || [];
-      const seen = new Set<string>();
 
+      const seen = new Set<string>();
       const uniqueRows = rows.filter((r: any) => {
-        const isInvalid = (val: any) => {
-          if (val === null || val === undefined) return true;
-          if (typeof val === "string") {
-            const v = val.trim().toLowerCase();
-            return v === "" || v === "null" || v === "undefined";
-          }
-          return false;
-        };
+        const invalid = (v: any) =>
+          v == null || v === "" || v === "null" || v === "undefined";
 
         if (
-          isInvalid(r.start_gps) ||
-          isInvalid(r.end_gps) ||
-          isInvalid(r.start_area_code) ||
-          isInvalid(r.end_area_code)
-        ) {
+          invalid(r.start_gps) ||
+          invalid(r.end_gps) ||
+          invalid(r.start_area_code) ||
+          invalid(r.end_area_code)
+        )
           return false;
-        }
 
         const clean = (gps: string) => {
           const cleaned = gps.replace(/[()]/g, "").trim();
@@ -101,16 +85,16 @@ const MapDashboard: React.FC = () => {
 
         if (!startGPS || !endGPS) return false;
 
-        const forwardKey = [startGPS, endGPS, startPin, endPin].join("|");
-        const reverseKey = [endGPS, startGPS, endPin, startPin].join("|");
+        const forward = [startGPS, endGPS, startPin, endPin].join("|");
+        const reverse = [endGPS, startGPS, endPin, startPin].join("|");
 
-        if (seen.has(forwardKey) || seen.has(reverseKey)) return false;
-        seen.add(forwardKey);
+        if (seen.has(forward) || seen.has(reverse)) return false;
+        seen.add(forward);
         return true;
       });
 
       const grouped: Record<string, GroupedItem> = {};
-      const pinSet = new Set<string>();
+      const pins = new Set<string>();
 
       uniqueRows.forEach((r: any) => {
         const gpsList = [
@@ -119,39 +103,22 @@ const MapDashboard: React.FC = () => {
         ].filter((x) => x.gps);
 
         const pin = r.start_area_code || r.end_area_code || "Unknown";
-        if (pin) pinSet.add(pin);
+        if (pin) pins.add(pin);
 
-        gpsList.forEach(({ gps, type }) => {
+        gpsList.forEach(({ gps }) => {
           const coords = cleanCoords(gps);
           if (!coords) return;
-
-          const key = `${pin}_${coords.join(",")}_${type}`;
+          const key = `${pin}_${coords.join(",")}`;
           if (!grouped[key]) {
-            grouped[key] = {
-              pincode: pin,
-              coords,
-              count: 0,
-              samples: [],
-            };
+            grouped[key] = { pincode: pin, coords, count: 0, samples: [] };
           }
-
           grouped[key].count += 1;
-          grouped[key].samples.push({
-            action: r.action,
-            created_time: r.created_time,
-            bap_id: r.bap_id,
-            transaction_id: r.transaction_id,
-            message_id: r.message_id,
-            category: r.category,
-            category_id: r.category_id,
-            start_gps: r.start_gps,
-            end_gps: r.end_gps,
-          });
+          grouped[key].samples.push(r);
         });
       });
 
       setData(Object.values(grouped));
-      setAllPins([...pinSet].sort());
+      setAllPins([...pins].sort());
     } catch (err) {
       console.error("❌ Error fetching data:", err);
     }
@@ -161,48 +128,42 @@ const MapDashboard: React.FC = () => {
     fetchData();
   }, [fetchData]);
 
-  // 🎨 Color logic
-  const getColor = (count: number) => {
-    if (count > 1000) return "#006400";
-    if (count > 500) return "#32CD32";
-    if (count > 100) return "#FFD700";
-    if (count > 20) return "#FFA500";
-    return "#FF0000";
+  // Color + radius
+  const getColor = (c: number) =>
+    c > 1000
+      ? "#006400"
+      : c > 500
+      ? "#32CD32"
+      : c > 100
+      ? "#FFD700"
+      : c > 20
+      ? "#FFA500"
+      : "#FF0000";
+
+  const getRadius = (count: number, zoom: number) =>
+    Math.max(50, Math.min(Math.log(count + 1) * 120 * (12 / zoom), 1500));
+
+  // Zoom tracker
+  const ZoomTracker = () => {
+    useMapEvents({ zoomend: (e) => setZoomLevel(e.target.getZoom()) });
+    return null;
   };
 
-  // 🔁 Zoom-adaptive radius
-  const getRadius = (count: number, zoom: number) => {
-    const base = Math.log(count + 1) * 120;
-    const zoomScale = 12 / zoom;
-    const radius = base * zoomScale;
-    return Math.max(50, Math.min(radius, 1500));
-  };
-
-  // 📍 Marker icon
-  const markerIcon = new L.Icon({
+  const markerIcon = new Icon({
     iconUrl: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
     iconSize: [32, 32],
     iconAnchor: [16, 32],
   });
 
-  // 👁️ Track zoom
-  const ZoomTracker = () => {
-    useMapEvents({
-      zoomend: (e) => setZoomLevel(e.target.getZoom()),
-    });
-    return null;
-  };
+  const filteredData = data.filter((d) =>
+    !filterPin ? true : d.pincode.toString() === filterPin.trim()
+  );
 
-  const filteredData = data.filter((item) => {
-    if (!filterPin.trim()) return true;
-    return item.pincode.toString() === filterPin.trim();
-  });
-
-  // 🧹 Prevent "Map container already initialized" in StrictMode
   const mapContainerId = "leaflet-map";
+
   useEffect(() => {
-    const container = L.DomUtil.get(mapContainerId) as LeafletElement | null;
-    if (container) container._leaflet_id = null;
+    const el = document.getElementById(mapContainerId) as HTMLElement | null;
+    if (el && (el as any)._leaflet_id) delete (el as any)._leaflet_id;
   }, [filterPin, data.length]);
 
   return (
@@ -211,7 +172,7 @@ const MapDashboard: React.FC = () => {
         Coordinates by Pincode (Full Details on Hover)
       </h2>
 
-      {/* 🔽 Dropdown Filter */}
+      {/* Dropdown filter */}
       <div
         style={{
           display: "flex",
@@ -237,7 +198,6 @@ const MapDashboard: React.FC = () => {
             </option>
           ))}
         </select>
-
         <button
           type="button"
           onClick={() => setFilterPin("")}
@@ -254,54 +214,46 @@ const MapDashboard: React.FC = () => {
         </button>
       </div>
 
-      {/* 🗺️ Map */}
+      {/* Map */}
       <MapContainer
         id={mapContainerId}
         key={`${filterPin}-${data.length}`}
         center={[12.97, 77.59]}
         zoom={11}
         style={{ height: "85vh", width: "100%" }}
-        preferCanvas={true}
+        preferCanvas
       >
         <ZoomTracker />
-
         <TileLayer
           attribution='&copy; OpenStreetMap contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        <MarkerClusterGroup>
-          {filteredData.map((item, i) => (
-            <Marker key={i} position={item.coords} icon={markerIcon}>
-              <Popup>
-                <b>Pincode:</b> {item.pincode} <br />
-                <b>Lat:</b> {item.coords[0]} <br />
-                <b>Lng:</b> {item.coords[1]} <br />
-                <b>Count:</b> {item.count}
-                <hr />
-                {item.samples.slice(0, 3).map((s, j) => (
-                  <div key={j} style={{ marginBottom: "6px" }}>
-                    <b>Action:</b> {s.action} <br />
-                    <b>BAP:</b> {s.bap_id} <br />
-                    <b>Txn:</b> {s.transaction_id} <br />
-                    <b>Msg:</b> {s.message_id} <br />
-                    <b>Category:</b> {s.category} ({s.category_id}) <br />
-                    <small>
-                      <b>Created:</b>{" "}
-                      {new Date(s.created_time).toLocaleString()}
-                    </small>
-                    <hr />
-                  </div>
-                ))}
-                {item.samples.length > 3 && (
-                  <small style={{ color: "gray" }}>
-                    +{item.samples.length - 3} more records...
-                  </small>
-                )}
-              </Popup>
-            </Marker>
-          ))}
-        </MarkerClusterGroup>
+        {/* Render Markers directly */}
+        {filteredData.map((item, i) => (
+          <Marker key={i} position={item.coords} icon={markerIcon}>
+            <Popup>
+              <b>Pincode:</b> {item.pincode}
+              <br />
+              <b>Count:</b> {item.count}
+              <hr />
+              {item.samples.slice(0, 3).map((s: any, j: number) => (
+                <div key={j} style={{ marginBottom: "6px" }}>
+                  <b>Action:</b> {s.action} <br />
+                  <b>BAP:</b> {s.bap_id} <br />
+                  <b>Txn:</b> {s.transaction_id} <br />
+                  <b>Category:</b> {s.category}
+                  <hr />
+                </div>
+              ))}
+              {item.samples.length > 3 && (
+                <small style={{ color: "gray" }}>
+                  +{item.samples.length - 3} more records...
+                </small>
+              )}
+            </Popup>
+          </Marker>
+        ))}
 
         {filteredData.map((item, i) => (
           <Circle
@@ -313,15 +265,10 @@ const MapDashboard: React.FC = () => {
             fillOpacity={0.4}
             weight={1.5}
           >
-            <Tooltip direction="top" offset={[0, -15]} permanent={false}>
-              <b>Pincode:</b> {item.pincode} <br />
-              <b>Lat:</b> {item.coords[0].toFixed(4)} <br />
-              <b>Lng:</b> {item.coords[1].toFixed(4)} <br />
-              <b>Count:</b> {item.count} <br />
-              <b>Action:</b> {item.samples[0]?.action || "-"} <br />
-              <b>BAP:</b> {item.samples[0]?.bap_id || "-"} <br />
-              <b>Txn:</b> {item.samples[0]?.transaction_id || "-"} <br />
-              <b>Category:</b> {item.samples[0]?.category || "-"}
+            <Tooltip direction="top" offset={[0, -15]}>
+              <b>Pincode:</b> {item.pincode}
+              <br />
+              <b>Count:</b> {item.count}
             </Tooltip>
           </Circle>
         ))}
